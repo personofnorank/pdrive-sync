@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# pdrive-sync — convenience wrapper around the app venv.
+APP_DIR="$HOME/pdrive-sync-app"
+export PYTHONPATH="$APP_DIR${PYTHONPATH:+:$PYTHONPATH}"
+cd "$APP_DIR" || exit 1
+exec "$APP_DIR/.venv/bin/python" -m pdrive_sync.cli "$@"
