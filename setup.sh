@@ -28,11 +28,20 @@ fi
 if [[ ! -x "$CLI_BIN" ]]; then
     echo "--- downloading official Proton Drive CLI"
     mkdir -p "$APP_DIR/bin"
-    url="https://proton.me/download/drive/cli/linux/x64/proton-drive"
-    curl -fSL --progress-bar -o "$CLI_BIN" "$url" || {
+    # The download URL is versioned (…/cli/<ver>/linux-x64/proton-drive) and the
+    # version changes per release, so parse the download page for the latest.
+    ver=$(curl -fsSL --max-time 25 "https://proton.me/download/drive/cli/index.html" \
+          | grep -oE 'cli/[0-9]+\.[0-9]+\.[0-9]+/' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' \
+          | sort -V | tail -1)
+    if [[ -z "$ver" ]]; then
+        echo "  could not determine latest CLI version; falling back to 0.8.0"
+        ver="0.8.0"
+    fi
+    echo "  latest CLI version: $ver"
+    base="https://proton.me/download/drive/cli/$ver"
+    curl -fSL --progress-bar -o "$CLI_BIN" "$base/linux-x64/proton-drive" || {
         echo "  default build failed; trying baseline (no AVX2)"
-        curl -fSL --progress-bar -o "$CLI_BIN" \
-            "https://proton.me/download/drive/cli/linux/x64-baseline/proton-drive"
+        curl -fSL --progress-bar -o "$CLI_BIN" "$base/linux-x64-baseline/proton-drive"
     }
     chmod +x "$CLI_BIN"
 fi
