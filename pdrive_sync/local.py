@@ -99,8 +99,12 @@ def scan_local() -> dict[str, LocalNode]:
     """
     out: dict[str, LocalNode] = {}
     root = config.SYNC_ROOT
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if not is_excluded(d, is_dir=True)]
+    for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+        # don't descend into symlinked dirs (e.g. shared dirs whose target lives
+        # elsewhere) — they'd be scanned as if local and confuse the diff
+        dirnames[:] = [d for d in dirnames
+                       if not is_excluded(d, is_dir=True)
+                       and not (Path(dirpath) / d).is_symlink()]
         for d in dirnames:
             p = Path(dirpath) / d
             try:
@@ -115,6 +119,8 @@ def scan_local() -> dict[str, LocalNode]:
             if is_excluded(f):
                 continue
             p = Path(dirpath) / f
+            if p.is_symlink():
+                continue  # skip symlinks (e.g. per-machine .usage.json); never sync the link or target
             try:
                 rel = rel_of(p)
             except ValueError:
