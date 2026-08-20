@@ -518,26 +518,59 @@ class Reconciler:
             local_tree = {p: n for p, n in local_tree.items() if p == scope or p.startswith(pfx)}
             remote_tree = {p: n for p, n in remote_tree.items() if p == scope or p.startswith(pfx)}
 
-        # --- Remote-implosion guard ---------------------------------------
-        # If the snapshot tracks many paths but this remote walk returned almost
-        # nothing, the walk almost certainly failed (auth hiccup / network
-        # timeout / API error), NOT a real mass deletion. Treating an empty
-        # remote as authoritative is what proposed deleting 578k files. Refuse:
-        # skip the cycle and alert, so a transient blip can't nuke the tree.
+        # --- Remote-implosion guards --------------------------------------
+        # (a) whole-tree: a nearly-empty remote read when the snapshot is large
+        #     means the walk failed (auth/network), not a mass deletion.
+        # (b) per-folder: if a specific top-level folder's returned subtree is
+        #     drastically smaller than its tracked subtree while the walk claims
+        #     to have covered that folder, that folder's diff is untrusted — drop
+        #     its deletes. This is what nearly wiped 5,627 Pictures files when
+        #     the walk dropped just that subtree.
         tracked = self.db.count()
         if not scope and tracked > 100 and len(remote_tree) < max(10, tracked // 20):
             log.error("remote walk returned only %d nodes but snapshot tracks %d — "
-                      "walk likely failed (auth/network). Skipping cycle; no deletes "
-                      "will be proposed from an untrusted empty remote.", len(remote_tree), tracked)
+                      "walk likely failed (auth/network). Skipping cycle.", len(remote_tree), tracked)
             notify("pdrive-sync: skipped cycle",
                    f"remote read looked empty ({len(remote_tree)} nodes vs {tracked} tracked) — likely auth/network blip", "critical")
             return 0, 0
+
+        # per-folder partial-implosion check (unscoped cycles only)
+        untrusted_folders: set[str] = set()
+        if not scope:
+            import collections
+            tracked_by_root = collections.Counter()
+            for r in self.db.all_paths():
+                root0 = r["path"].split("/")[0] if r["path"] else ""
+                tracked_by_root[root0] += 1
+            returned_by_root = collections.Counter(
+                (p.split("/")[0] if p else "") for p in remote_tree.keys())
+            for root0, tcount in tracked_by_root.items():
+                if not root0:
+                    continue
+                # only judge folders the walk was expected to return (skip tiny ones)
+                if tcount > 50:
+                    rcount = returned_by_root.get(root0, 0)
+                    # if we got back <20% of what we track for this folder, the
+                    # walk dropped the subtree -> untrusted
+                    if rcount < max(2, tcount // 5):
+                        untrusted_folders.add(root0)
+                        log.warning("remote implosion in folder '%s': returned %d nodes but snapshot "
+                                    "tracks %d — its deletes are untrusted and will be dropped",
+                                    root0, rcount, tcount)
+        if untrusted_folders:
+            notify("pdrive-sync: dropped phantom deletes",
+                   "remote walk dropped folder(s): " + ", ".join(sorted(untrusted_folders)), "normal")
 
         # The local scan is authoritative (trusted) only for a full, unscoped
         # cycle. A scoped resync filters the scan, so a "missing locally" there
         # is untrusted and must never trigger a remote delete.
         changes = compute_changes(local_tree, remote_tree, self.db, force=force,
                                   scope=scope, trusted_local=(not scope))
+        # strip deletes belonging to untrusted (imploded) folders
+        if untrusted_folders:
+            changes = [c for c in changes
+                       if not (c.action in (Action.DELETE_LOCAL, Action.DELETE_REMOTE)
+                               and c.path.split("/")[0] in untrusted_folders)]
 
         # Snapshot in-sync paths too: a path that's identical on both sides
         # produces NO change, so without this it would never be recorded and the
