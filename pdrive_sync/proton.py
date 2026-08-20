@@ -173,11 +173,47 @@ def walk_remote(remote_rel: str = "", db=None, prune: bool = True) -> dict[str, 
     return out
 
 
+_CLI_IS_08: Optional[bool] = None
+
+
+def _cli_is_08_or_newer() -> bool:
+    """Detect whether the bundled CLI uses the 0.8.0+ flag scheme.
+
+    0.8.0 removed the combined `-c/--conflict-strategy` and split it into
+    `-f/--file-conflict-strategy` + `-d/--folder-conflict-strategy`, and renamed
+    the values (download: replace->remove, keep-both->rename). Cache the check.
+    """
+    global _CLI_IS_08
+    if _CLI_IS_08 is None:
+        try:
+            proc = _run(["version"], timeout=30)
+            m = re.search(r"cli-drive@(\d+)\.(\d+)\.(\d+)", proc.stdout + proc.stderr)
+            _CLI_IS_08 = bool(m and (int(m.group(1)), int(m.group(2)), int(m.group(3))) >= (0, 8, 0))
+        except Exception:
+            _CLI_IS_08 = True  # assume newest if detection fails
+    return _CLI_IS_08
+
+
+def _conflict_args(op: str, strategy: str) -> list[str]:
+    """Map a logical strategy to the right CLI flags for the installed version.
+
+    op       : 'upload' or 'download'
+    strategy : 'replace' | 'keep-both' | 'skip'  (logical, version-independent)
+    """
+    if _cli_is_08_or_newer():
+        if op == "upload":
+            val = {"replace": "replace", "keep-both": "rename", "skip": "skip"}[strategy]
+        else:  # download
+            val = {"replace": "remove", "keep-both": "rename", "skip": "skip"}[strategy]
+        return ["-f", val, "-d", val]
+    return ["-c", strategy]
+
+
 def upload(local_abs: str, remote_parent_rel: str, strategy: str = "replace") -> str:
     # The CLI treats the local path as a glob; escape glob metacharacters
     # ([ ] * ? \) so filenames like '[...slug].astro' match literally.
-    glob_safe = re.sub(r'([\\*?\[\]])', r'\\\1', local_abs)
-    args = ["filesystem", "upload", "-c", strategy, "-t", glob_safe,
+    glob_safe = re.sub(r'([\\\\*?\\[\\]])', r'\\\\\\1', local_abs)
+    args = ["filesystem", "upload"] + _conflict_args("upload", strategy) + ["-t", glob_safe,
             config.REMOTE_ROOT if not remote_parent_rel else f"{config.REMOTE_ROOT}/{remote_parent_rel}"]
     proc = _run(args, timeout=3600)
     if proc.returncode != 0:
@@ -186,7 +222,7 @@ def upload(local_abs: str, remote_parent_rel: str, strategy: str = "replace") ->
 
 
 def download(remote_rel: str, local_parent_abs: str, strategy: str = "replace") -> str:
-    args = ["filesystem", "download", "-c", strategy,
+    args = ["filesystem", "download"] + _conflict_args("download", strategy) + [
             f"{config.REMOTE_ROOT}/{remote_rel}" if remote_rel else config.REMOTE_ROOT,
             local_parent_abs]
     proc = _run(args, timeout=3600)
