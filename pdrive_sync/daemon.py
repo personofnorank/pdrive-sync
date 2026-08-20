@@ -16,6 +16,42 @@ from .state import StateDB
 
 log = get_logger()
 
+# Newest CLI version this build's flag-mapping has been verified against.
+# Bump this after testing a newer CLI. If the installed CLI is newer, we warn
+# once at startup (flags may have changed) instead of failing every transfer.
+_TESTED_CLI = (0, 8, 0)
+
+
+def _check_cli_compat() -> None:
+    """Warn if the installed CLI version is unrecognised or newer than tested.
+
+    Returns normally either way — this is an early-warning check, not a hard
+    gate. The dialect mapping in proton.py handles 0.6.x/0.7.x/0.8.x; anything
+    newer just gets a heads-up notification so a breaking flag change is caught
+    at startup rather than as a storm of mid-cycle transfer failures.
+    """
+    import re
+    import subprocess
+    try:
+        proc = subprocess.run([config.CLI, "version"], capture_output=True, text=True, timeout=30)
+        m = re.search(r"cli-drive@(\d+)\.(\d+)\.(\d+)", proc.stdout + proc.stderr)
+        if not m:
+            log.warning("could not parse CLI version from %r", config.CLI)
+            notify("pdrive-sync: CLI version unknown",
+                   "couldn't parse proton-drive version; sync may misbehave", "normal")
+            return
+        ver = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        log.info("proton-drive CLI version: %d.%d.%d (tested up to %d.%d.%d)",
+                 *ver, *_TESTED_CLI)
+        if ver > _TESTED_CLI:
+            log.warning("CLI %s is newer than this build was tested against (%s); "
+                        "conflict flags may have changed",
+                        ".".join(map(str, ver)), ".".join(map(str, _TESTED_CLI)))
+            notify("pdrive-sync: untested CLI version",
+                   f"CLI {'.'.join(map(str,ver))} > tested {'.'.join(map(str,_TESTED_CLI))}; watch for transfer errors", "normal")
+    except Exception as e:
+        log.warning("CLI version check failed: %s", e)
+
 
 class _Lock:
     """Single-instance lock via flock."""
@@ -102,6 +138,12 @@ def run_daemon(force: bool = False, no_delete: bool = False):
 
     log.info("pdrive-sync starting: %s <-> %s%s", config.SYNC_ROOT, config.REMOTE_ROOT,
              "  [NO-DELETE mode]" if no_delete else "")
+
+    # CLI compatibility self-check: the conflict-flag dialect changed at 0.8.0
+    # (`-c` removed, split into `-f`/`-d` with renamed values). If the installed
+    # CLI is unrecognised or newer than the newest version this build was tested
+    # against, warn up front rather than failing every transfer mid-cycle.
+    _check_cli_compat()
 
     # The session lives in the OS keyring, which may still be locked right after
     # a reboot/login when a user service starts. Retry the auth check for a
