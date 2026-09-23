@@ -25,8 +25,20 @@ fi
 systemctl --user reset-failed pdrive-sync.service 2>/dev/null || true
 
 echo "--- pulling latest code"
+SELF="$APP_DIR/update.sh"
+self_before=$(md5sum "$SELF" | cut -d' ' -f1)
 git fetch origin
 git reset --hard origin/main   # only touches git-tracked files; data/bin/.venv are gitignored
+
+# If the pull replaced update.sh itself, re-exec the new version — bash reads
+# scripts incrementally, so continuing in a file that changed under us risks
+# running stale/garbled lines (this exact hazard bit us on lookfar: an old
+# hardcoded-path update.sh pulled the new code, then died on its own stale line).
+self_after=$(md5sum "$SELF" | cut -d' ' -f1)
+if [[ "$self_before" != "$self_after" ]]; then
+    echo "--- update.sh changed in the pull; re-execing the new version"
+    exec bash "$SELF" "$@"
+fi
 
 # --- venv: rebuild if missing OR stale (app dir was moved) -------------------
 # A venv is NOT relocatable: its entry-point scripts hardcode the absolute
