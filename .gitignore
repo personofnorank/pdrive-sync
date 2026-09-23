@@ -13,7 +13,7 @@ bin/
 
 # pdrive-sync local env (per-machine; contains no secrets but is machine-specific)
 # Uncomment the next line if you prefer NOT to version the env file:
-# pdrive-sync.env
+pdrive-sync.env
 
 # OS noise
 .DS_Store
