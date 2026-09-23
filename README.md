@@ -17,7 +17,7 @@ For every path it compares three states:
 |---|---|
 | **L** | current local filesystem (`~/pdrive`, watched via inotify) |
 | **R** | current remote tree (Proton Drive, via the CLI) |
-| **S** | last-synced snapshot (SQLite at `~/pdrive-sync-app/data/state.db`) |
+| **S** | last-synced snapshot (SQLite at `$PDRIVE_APP_DIR/data/state.db`) |
 
 and derives an action:
 
@@ -52,7 +52,7 @@ the daemon uses an **adaptive** strategy —
 ## Setup
 
 ```bash
-cd ~/pdrive-sync-app
+cd <pdrive-sync-app>   # wherever you cloned it
 ./pdrive-sync resync      # one-off baseline: reconcile both trees (resumable)
 ./pdrive-sync install     # install + enable the systemd --user service
 ./pdrive-sync start       # start background sync
@@ -89,22 +89,54 @@ Add your own patterns (fnmatch, one per line, `#` comments) to:
 |---|---|---|
 | `PDRIVE_SYNC_ROOT` | `~/pdrive` | local sync root |
 | `PDRIVE_REMOTE_ROOT` | `/my-files` | remote root |
-| `PDRIVE_CLI` | `~/pdrive-sync-app/bin/proton-drive` | path to the official CLI |
+| `PDRIVE_CLI` | `$PDRIVE_APP_DIR/bin/proton-drive` | path to the official CLI |
+| `PDRIVE_APP_DIR` | `~/pdrive-sync-app` | where the app (package + `bin/`) lives |
 | `PDRIVE_POLL_INTERVAL` | `60` | seconds between remote checks |
 | `PDRIVE_DEEP_INTERVAL` | `1800` | seconds between full remote walks |
 | `PDRIVE_MAX_DELETE` | `50` | delete safety cap per cycle |
 | `PDRIVE_NOTIFY` | `1` | desktop notifications on/off |
 
+### Per-machine env file (`pdrive-sync.env`) — NOT in git
+
+The systemd unit reads `$PDRIVE_APP_DIR/pdrive-sync.env` for `PDRIVE_APP_DIR`,
+`PDRIVE_NO_DELETE`, and `PROTON_DRIVE_CREDENTIALS_STORE`. **This file is
+gitignored and generated per machine** by `setup.sh`, because `PDRIVE_APP_DIR`
+is machine-specific — the app may live under a non-default home dir (e.g.
+`/home/jake` on one laptop vs `/home/jake.hoban@canonical.com` on another).
+Versioning it would cross-break machines on `git pull`: a pull would overwrite
+the correct local path with the other machine's. `setup.sh` derives `APP_DIR`
+from its own location, so it always writes the right path for the machine it
+runs on.
+
+If you edit `pdrive-sync.env`, the change is local-only — edit it again on each
+machine. Shared defaults (`PDRIVE_NO_DELETE`, the creds store) live in the file
+but can diverge per machine if needed.
+
 ## Layout
 
 ```
-~/pdrive-sync-app/
+<pdrive-sync-app>/   (wherever you cloned it — e.g. ~/pdrive/code/pdrive-sync)
   pdrive-sync            # CLI wrapper (this is what you run)
+  pdrive-sync.env        # per-machine env (PDRIVE_APP_DIR, …) — NOT in git
   pdrive_sync/           # the Python package
     config.py  state.py  local.py  proton.py  reconcile.py  daemon.py  cli.py
   .venv/                 # dedicated Python env (watchdog)
   data/                  # state.db, pdrive-sync.log, lock
 ```
+
+### Moving the app dir
+
+The app dir is relocatable, but a plain `mv` needs four follow-ups (or it'll
+break): update the `APP_DIR` in the `pdrive-sync` wrapper, repoint the
+`~/.local/bin/pdrive-sync` symlink, regenerate the systemd unit
+(`PDRIVE_APP_DIR=<new> .venv/bin/python -m pdrive_sync.cli install`), and
+**rebuild the venv** (`rm -rf .venv && python3 -m venv .venv && .venv/bin/pip
+install watchdog pytest pygments packaging`) — the venv's entry-point scripts
+hardcode the old absolute path in their shebangs and won't survive a move. If
+the new location is *inside* the synced tree (e.g. `~/pdrive/code/...`), also
+add it to `.pdrive-ignore` so its venv/state/binary don't churn through the
+sync.
+
 
 ## Notes / limits
 
