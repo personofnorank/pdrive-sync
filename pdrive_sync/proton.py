@@ -73,6 +73,23 @@ def _sanitize_rel(rel: str) -> str:
     return "/".join(_sanitize_name(s) for s in rel.split("/")) if rel else rel
 
 
+def revision(entry: dict) -> dict:
+    """The revision object from a CLI listing entry, across CLI versions.
+
+    CLI 0.8.0 exposes it at `activeRevision`; the 0.6.0-era schema nested it one
+    level deeper under `value`. Reading only the old shape silently produced
+    sha1=None for every file (on 2026-09-24 all 49,734 snapshot rows had a NULL
+    remote_sha1), which disabled the content-equality guard and let mtime drift
+    turn into mass conflicts. Accept both shapes.
+    """
+    rev = entry.get("activeRevision")
+    if not isinstance(rev, dict):
+        return {}
+    if "claimedDigests" not in rev and isinstance(rev.get("value"), dict):
+        return rev["value"]
+    return rev
+
+
 def _entry_to_node(rel: str, entry: dict) -> RemoteNode:
     name = (entry.get("name") or {}).get("value") or entry.get("uid", "?")
     is_dir = entry.get("type") == "folder"
@@ -90,7 +107,7 @@ def _entry_to_node(rel: str, entry: dict) -> RemoteNode:
     else:
         node.size = entry.get("totalStorageSize")
         node.mtime = _parse_time(entry.get("modificationTime"))
-        rev = (entry.get("activeRevision") or {}).get("value") or {}
+        rev = revision(entry)
         if rev:
             node.size = rev.get("claimedSize", node.size)
             node.mtime = _parse_time(rev.get("claimedModificationTime")) or node.mtime

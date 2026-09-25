@@ -107,6 +107,28 @@ def _same_file_content(l: LocalNode, r: RemoteNode, db: StateDB) -> bool:
     return l.size is not None and r.size is not None and l.size == r.size
 
 
+def _snapshot_identical(l: LocalNode, r: RemoteNode, db: StateDB) -> None:
+    """Record a snapshot row for a path whose two sides already hold the same bytes.
+
+    Needed when a path has no row at all — e.g. after a conflict copy has been
+    renamed back into its canonical name. Without the row the daemon re-hashes
+    that file on every single pass and never settles.
+    """
+    p = _resolve_local(db, l.path)
+    try:
+        st = p.stat()
+        lsha = sha1_file(p, config.HASH_COMPARE_LIMIT)
+    except OSError:
+        return
+    db.upsert(l.path, False,
+              local_sha1=lsha,
+              local_size=st.st_size,
+              local_mtime=st.st_mtime,
+              remote_uid=r.uid or None,
+              remote_sha1=r.sha1,
+              remote_mtime=r.mtime)
+
+
 def _resolve_local(db: StateDB, path: str):
     """abs_of(path), but honouring the snapshot's sanitized local_path when the
     on-disk name differs from the remote/snapshot name."""
@@ -240,6 +262,15 @@ def compute_changes(local_tree: dict[str, LocalNode],
                 if is_dir:
                     continue  # dirs: nothing to conflict about
                 if _same_file_content(l, r, db):
+                    # mtime drift only, or a stale row: content is identical, so
+                    # bring the snapshot up to date. Recording it (rather than
+                    # just continuing) matters because the stored remote_mtime
+                    # semantics changed when the revision parser was fixed, and
+                    # because a renamed-back conflict copy starts with no row at
+                    # all — either way, without the refresh this file is re-hashed
+                    # on every single pass and the tree never settles.
+                    if l is not None and r is not None:
+                        _snapshot_identical(l, r, db)
                     continue  # mtime drift only; content identical
                 changes.append(Change(path, Action.CONFLICT, False, l, r, "both changed"))
         elif l_exists and not r_exists:
@@ -269,6 +300,25 @@ def compute_changes(local_tree: dict[str, LocalNode],
         return (rank, depth)
 
     changes.sort(key=sort_key)
+
+    # Conflict-storm brake. Conflict copies are excluded from sync, so nothing
+    # ever cleans them up and a storm is unbounded disk growth: one pass on
+    # 2026-08-20 wrote 71,717 copies (342 GiB) and filled the disk. Abort rather
+    # than emit an unbounded number.
+    conflicts = [c for c in changes if c.action == Action.CONFLICT]
+    if conflicts and len(conflicts) > config.MAX_CONFLICTS and not force:
+        log.error("ABORT: %d conflicts proposed in one pass; cap is MAX_CONFLICTS=%d. "
+                  "Conflict copies are excluded from sync and nothing cleans them up. "
+                  "No conflicts applied this pass; rerun with --force to proceed.",
+                  len(conflicts), config.MAX_CONFLICTS)
+        log.error("Blocked conflict paths (showing %d of %d):",
+                  min(len(conflicts), 50), len(conflicts))
+        for c in conflicts[:50]:
+            log.error("  %-14s %s  (%s)", c.action.value, c.path, c.reason)
+        notify("pdrive-sync: conflicts blocked",
+               f"{len(conflicts)} conflicts proposed (cap {config.MAX_CONFLICTS}); see log",
+               "critical")
+        changes = [c for c in changes if c.action != Action.CONFLICT]
 
     deletes = [c for c in changes if c.action in (Action.DELETE_LOCAL, Action.DELETE_REMOTE)]
 
@@ -340,7 +390,7 @@ class Reconciler:
         # re-read remote state for snapshot accuracy
         r = proton.info(c.path)
         uid = r.get("uid") if r else None
-        rev = ((r or {}).get("activeRevision") or {}).get("value") or {}
+        rev = proton.revision(r or {})
         rsha = (rev.get("claimedDigests") or {}).get("sha1")
         rmt = proton._parse_time(rev.get("claimedModificationTime")) if rev else None
         if rmt is None and r:
@@ -429,7 +479,16 @@ class Reconciler:
         log.info("trashed remote %s", c.path)
 
     def _conflict(self, c: Change):
-        """Keep both. Newer mtime wins the canonical name (rclone 'newer' resolve)."""
+        """Keep both. Newer mtime wins the canonical name (rclone 'newer' resolve).
+
+        Order matters: the remote copy is FETCHED FIRST into a scratch directory,
+        and only then are names shuffled locally. The old order moved the local
+        file aside and *then* downloaded, so a failed download left the move
+        standing: 31,979 conflict copies ended up with no canonical file beside
+        them, and Sorted/2013/2013_05/2013_05_29 held 99 conflicts and zero
+        canonicals while the remote was still intact. Fetching first means a
+        failed or partial transfer cannot lose either side.
+        """
         p = _resolve_local(self.db, c.path)
         local_mtime = c.local.mtime or 0
         remote_mtime = c.remote.mtime or 0
@@ -437,15 +496,31 @@ class Reconciler:
         suffix_path = p.with_name(p.name.replace(p.suffix, "") + stamp + p.suffix) if p.suffix else \
             p.with_name(p.name + stamp)
 
-        if local_mtime >= remote_mtime:
-            # local wins name; download remote under conflict name
-            proton.download(_remote_raw(c), str(suffix_path.parent), strategy="keep-both")
-            log.info("conflict %s: local kept, remote saved as %s", c.path, suffix_path.name)
-        else:
-            # remote wins: move local aside, download remote to canonical name
-            shutil.move(str(p), str(suffix_path))
-            proton.download(_remote_raw(c), str(p.parent), strategy="replace")
-            log.info("conflict %s: remote kept, local saved as %s", c.path, suffix_path.name)
+        # 1. Fetch the remote version into scratch space, which is excluded from
+        #    sync (.pdrive-sync-tmp*). Nothing local is touched yet.
+        tmp_dir = p.parent / (config.CONFLICT_TMP_PREFIX + stamp)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            proton.download(_remote_raw(c), str(tmp_dir), strategy="keep-both")
+            fetched = sorted(q for q in tmp_dir.iterdir() if q.is_file())
+            if not fetched:
+                raise RuntimeError(f"conflict fetch produced no file for {c.path}")
+
+            # 2. Bytes are on disk — now the local renames, which cannot fail
+            #    for want of network access.
+            if local_mtime >= remote_mtime:
+                # local wins name; the remote copy lands beside it
+                os.replace(str(fetched[0]), str(suffix_path))
+                log.info("conflict %s: local kept, remote saved as %s", c.path, suffix_path.name)
+            else:
+                # remote wins the canonical name; the local copy is preserved as
+                # the conflict copy
+                os.replace(str(p), str(suffix_path))
+                os.replace(str(fetched[0]), str(p))
+                log.info("conflict %s: remote kept, local saved as %s", c.path, suffix_path.name)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
         notify("pdrive-sync: conflict", f"{c.path} — both versions kept", "normal")
         # refresh snapshot to the winning side; the .conflict-* copy is excluded
         self._refresh_snapshot(c.path)
@@ -457,7 +532,7 @@ class Reconciler:
             return
         st = p.stat()
         r = proton.info(path)
-        rev = ((r or {}).get("activeRevision") or {}).get("value") or {}
+        rev = proton.revision(r or {})
         self.db.upsert(path, p.is_dir(),
                        local_sha1=None if p.is_dir() else sha1_file(p, config.HASH_COMPARE_LIMIT),
                        local_size=None if p.is_dir() else st.st_size,
