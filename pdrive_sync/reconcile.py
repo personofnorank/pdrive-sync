@@ -227,7 +227,10 @@ def compute_changes(local_tree: dict[str, LocalNode],
             # one, and a wrong call cascades catastrophically (the Music bug).
             # Real dir deletes are handled by the watcher + the apply-time
             # re-stat in _delete_remote.
-            safe_to_delete = trusted_local and (not s_is_dir) and _ancestors_visible(path)
+            # A non-NULL remote_uid proves the file exists remotely (sha1 can be
+            # NULL if the CLI didn't return it during an earlier sync).
+            has_remote_proof = (s["remote_sha1"] or s["remote_uid"]) if s else False
+            safe_to_delete = trusted_local and (not s_is_dir) and _ancestors_visible(path) and has_remote_proof
             if safe_to_delete:
                 changes.append(Change(path, Action.DELETE_REMOTE, s_is_dir, None, r, "deleted locally"))
             else:
