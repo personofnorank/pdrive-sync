@@ -275,7 +275,18 @@ def compute_changes(local_tree: dict[str, LocalNode],
                     if l is not None and r is not None:
                         _snapshot_identical(l, r, db)
                     continue  # mtime drift only; content identical
-                changes.append(Change(path, Action.CONFLICT, False, l, r, "both changed"))
+                # Content genuinely differs. If local is newer than remote,
+                # upload wins (no conflict). Only conflict when remote is newer
+                # or mtimes are ambiguous.
+                l_mtime = l.mtime if l else None
+                r_mtime = r.mtime if r else None
+                l_newer = (l_mtime is not None and r_mtime is not None and
+                           l_mtime > r_mtime)
+                if l_newer:
+                    changes.append(Change(path, Action.UPLOAD, is_dir, l, r,
+                                          "local newer, overwrite remote"))
+                else:
+                    changes.append(Change(path, Action.CONFLICT, False, l, r, "both changed"))
         elif l_exists and not r_exists:
             if s_exists:
                 # was synced, remote gone => remote deleted it
