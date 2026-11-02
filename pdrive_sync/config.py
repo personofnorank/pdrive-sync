@@ -17,6 +17,10 @@ LOCK_PATH = DATA_DIR / "pdrive-sync.lock"
 # periodically cleared, into the app dir).
 CLI = os.environ.get("PDRIVE_CLI", str(APP_DIR / "bin" / "proton-drive"))
 
+# Folder (relative to SYNC_ROOT) whose media is uploaded one-way to Proton Photos
+# by `pdrive-sync photos-sync`. Independent of the Drive sync.
+PHOTOS_DIR = os.environ.get("PDRIVE_PHOTOS_DIR", "Pictures")
+
 # --- Behaviour ---------------------------------------------------------------
 POLL_INTERVAL = float(os.environ.get("PDRIVE_POLL_INTERVAL", "60"))
 # Full (recursive) remote walk cadence, in seconds. The pruned walk runs every

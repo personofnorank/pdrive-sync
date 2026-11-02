@@ -26,6 +26,13 @@ CREATE TABLE IF NOT EXISTS nodes (
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(path);
 
+CREATE TABLE IF NOT EXISTS photo_uploads (
+    path        TEXT NOT NULL,
+    size        INTEGER NOT NULL,
+    uploaded_at REAL NOT NULL,
+    PRIMARY KEY (path, size)
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT
@@ -150,6 +157,17 @@ class StateDB:
         if prefix == "":
             return self.all_paths()
         return list(self.conn.execute("SELECT * FROM nodes WHERE path LIKE ?", (prefix.rstrip("/") + "/%",)))
+
+    # -- photos upload ledger (add-only; never read by the Drive reconcile) ----
+    def photo_uploaded_keys(self) -> set:
+        return {(r["path"], r["size"]) for r in self.conn.execute("SELECT path,size FROM photo_uploads")}
+
+    def photo_mark_uploaded(self, keys) -> None:
+        now = time.time()
+        self.conn.executemany(
+            "INSERT OR REPLACE INTO photo_uploads(path,size,uploaded_at) VALUES (?,?,?)",
+            [(p, s, now) for p, s in keys])
+        self.conn.commit()
 
     # -- meta --------------------------------------------------------------
     def get_meta(self, key: str) -> Optional[str]:

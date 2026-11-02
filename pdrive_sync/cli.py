@@ -183,6 +183,29 @@ def cmd_conflicts(args):
     return 0
 
 
+def cmd_photos_sync(args):
+    """One-way, add-only upload of local media to Proton Photos (plan unless --apply)."""
+    from . import photos
+    db = StateDB()
+    if args.verify:
+        res = photos.verify_photos(db)
+        db.close()
+        for k, v in res.items():
+            print(f"  {k}: {v}")
+        print(("VERIFY CLEAN (uploaded files only; held-back undated files are NOT in Photos: keep their Drive copies)" if res["clean"] else "VERIFY NOT CLEAN: do not delete anything from Drive"))
+        return 0 if res["clean"] else 1
+    summary, up, failed = photos.sync_photos(db, apply=args.apply, limit=args.limit)
+    db.close()
+    print(f"photos source: {photos.photos_root()}  (screenshots excluded)")
+    for k, v in summary.items():
+        print(f"  {k}: {v}")
+    if args.apply:
+        print(f"uploaded {up}, failed {failed}")
+        return 1 if failed else 0
+    print("plan only: nothing uploaded (use --apply to upload)")
+    return 0
+
+
 def cmd_install(args):
     unit_dir = Path.home() / ".config" / "systemd" / "user"
     unit_dir.mkdir(parents=True, exist_ok=True)
@@ -247,6 +270,10 @@ def main(argv=None):
     sp = sub.add_parser("plan", help="dry-run: show what WOULD change, apply nothing")
     sp = sub.add_parser("resync", help="rebuild baseline from scratch (use --dry-run to preview)"); sp.add_argument("-y", "--yes", action="store_true")
     sub.add_parser("resync-status", help="show baseline (resync) progress")
+    sp = sub.add_parser("photos-sync", help="one-way add-only upload of Pictures to Proton Photos (plan unless --apply)")
+    sp.add_argument("--apply", action="store_true", help="actually upload (default: plan only)")
+    sp.add_argument("--limit", type=int, default=None, help="upload at most N files this run")
+    sp.add_argument("--verify", action="store_true", help="read-only: check ledger + Photos timeline; deletes nothing")
     sub.add_parser("conflicts", help="list conflict copies")
     sub.add_parser("install", help="install & enable the systemd user service")
     sub.add_parser("uninstall", help="disable & remove the systemd user service")
@@ -255,7 +282,7 @@ def main(argv=None):
     fn = {"start": cmd_start, "stop": cmd_stop, "status": cmd_status, "logs": cmd_logs,
           "run": cmd_run, "sync": cmd_sync, "plan": cmd_plan,
           "resync": cmd_resync, "resync-status": cmd_resync_status,
-          "conflicts": cmd_conflicts,
+          "conflicts": cmd_conflicts, "photos-sync": cmd_photos_sync,
           "install": cmd_install, "uninstall": cmd_uninstall}[args.cmd]
     return fn(args) or 0
 

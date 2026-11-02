@@ -238,6 +238,25 @@ def upload(local_abs: str, remote_parent_rel: str, strategy: str = "replace") ->
     return proc.stdout
 
 
+def photo_timeline() -> str:
+    """Read-only listing of the Photos timeline (`photo timeline -d`)."""
+    proc = _run(["photo", "timeline", "-d"], timeout=3600)
+    if proc.returncode != 0:
+        raise CliError(f"photo timeline: {proc.stderr.strip() or proc.stdout.strip()}")
+    return proc.stdout
+
+
+def photo_upload(local_paths: list[str]) -> str:
+    """Upload files to Proton *Photos* (add-only). Always `-c skip`: never rename
+    and never replace. Paths are passed verbatim after `--`-less positional args;
+    glob metacharacters are escaped like in upload()."""
+    safe = [re.sub(r'([\\\\*?\\[\\]])', r'\\\\\\1', p) for p in local_paths]
+    proc = _run(["photo", "upload", "-c", "skip"] + safe, timeout=7200)
+    if proc.returncode != 0:
+        raise CliError(f"photo upload ({len(local_paths)} files): {proc.stderr.strip() or proc.stdout.strip()}")
+    return proc.stdout
+
+
 def download(remote_rel: str, local_parent_abs: str, strategy: str = "replace") -> str:
     args = ["filesystem", "download"] + _conflict_args("download", strategy) + [
             f"{config.REMOTE_ROOT}/{remote_rel}" if remote_rel else config.REMOTE_ROOT,
