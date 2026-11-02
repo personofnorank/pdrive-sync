@@ -70,8 +70,35 @@ cd <pdrive-sync-app>   # wherever you cloned it
 | `pdrive-sync conflicts` | list unresolved `*.conflict-*` copies |
 | `pdrive-sync install` / `uninstall` | manage the systemd user unit |
 | `pdrive-sync run` | run the daemon in the foreground (debugging) |
+| `pdrive-sync photos-sync [--apply] [--limit N] [--verify]` | upload `Pictures` to Proton Photos (plan-only unless `--apply`); see below |
 
 `--force` (global) bypasses the `MAX_DELETE` safety cap.
+
+## Photos upload (`photos-sync`)
+
+Proton Photos is a separate volume from Drive, so files synced to Drive never
+appear on the Photos timeline. `photos-sync` uploads the local `Pictures` folder
+(`PDRIVE_PHOTOS_DIR`, default `Pictures`) to Photos. It is opt-in, never runs
+from the daemon, and is independent of the Drive sync.
+
+- **Add-only.** Uses `photo upload -c skip`; there is no delete or trash path and
+  nothing is removed from Drive or Photos. Pictures keeps syncing to Drive, so
+  the same photos use storage in both places.
+- **Plan by default.** Without `--apply` it only prints counts and writes
+  `photos_held_back.txt` to the data dir. `--limit N` caps files uploaded per run.
+- **Excluded:** any `Screenshots` folder and files named `Screenshot_*`.
+- **Dates:** EXIF, then `exiftool`, then a `YYYYMMDD_HHMMSS` filename stamp, then
+  a folder date (`2020-03`, `2008_10_01`, `2024/09`; the 1st of the month if no
+  day). Corrected dates are applied to temporary copies; originals are never
+  modified. Files whose only date is mtime are held back and listed in
+  `photos_held_back.txt`, because mtime is just the sync time.
+- **Same names:** Photos is flat, so same-name files are compared byte-for-byte.
+  Identical files upload once; different files are uploaded as
+  `name__<hash8>.ext` copies.
+- **`--verify`** (read-only) checks the upload ledger and the names in
+  `photo timeline -d`. It is not clean if the listing can't be read or parsed,
+  and held-back files are NOT in Photos, so keep their Drive copies. The
+  timeline output format is not documented by the CLI; the parser is best-effort.
 
 ## Excluding paths
 
@@ -147,5 +174,6 @@ sync.
   the CLI exposes no event stream. Local→remote is instant. If Proton ships an
   `events` subcommand (the SDK already has `subscribeToDriveEvents`), this can
   be upgraded to near-real-time both ways.
-- Syncs `/my-files` only (not `photos`, `shared-with-me`, etc.) by default;
+- The Drive sync covers `/my-files` only (not `photos`, `shared-with-me`, etc.) by default;
+  Photos uploads are done separately by `photos-sync`;
   point `PDRIVE_REMOTE_ROOT` elsewhere if you want a subtree.
