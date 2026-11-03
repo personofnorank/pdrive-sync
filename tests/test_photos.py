@@ -248,6 +248,14 @@ def test_verify_json_timeline_and_cli_failure(env):
     assert not r["clean"] and "auth" in r["remote_check"]
 
 
+def test_timeline_text_lines(env):
+    txt = ("Nov 02 2026 13:58 2.54 MiB IMG_20261102_134512121.jpg\n"
+           "Aug 11 2025 17:59 - IMG_20250811_133225.jpg\n"
+           "Oct 30 2026 21:41 1.00 KiB My Photo 1.jpg\n")
+    assert env.photos.remote_names_from_timeline(txt) == {
+        "img_20261102_134512121.jpg", "img_20250811_133225.jpg", "my photo 1.jpg"}
+
+
 def test_embedded_stamp_and_year_month_folders(env):
     f = env.photos.filename_datetime
     assert f("image_0284b04f-a895-4e53-9b95-1c3366aabfd420221228_210322.jpg") == datetime(2022, 12, 28, 21, 3, 22).timestamp()

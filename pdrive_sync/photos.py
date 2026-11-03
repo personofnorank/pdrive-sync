@@ -472,6 +472,10 @@ def _cleanup_stage(sdir: Path) -> None:
         log.warning("photos: could not remove staging dir %s: %s", sdir, e)
 
 
+_TIMELINE_LINE_RE = re.compile(
+    r"^[A-Z][a-z]{2} \d{1,2} \d{4} \d{1,2}:\d{2} (?:[\d.,]+ [A-Za-z]+|-) (.+)$")
+
+
 def remote_names_from_timeline(text: str) -> Optional[set[str]]:
     """Best-effort parse of `photo timeline -d` output into lower-cased file names.
     The CLI documents no output format, so accept JSON (any nesting, 'name' keys) or
@@ -492,6 +496,14 @@ def remote_names_from_timeline(text: str) -> Optional[set[str]]:
     try:
         walk(json.loads(text))
     except ValueError:
+        # Real `photo timeline -d` output: "Nov 02 2026 13:58 2.54 MiB <name>"
+        # (size is "-" for some rows). Names may contain spaces; take the rest of line.
+        for line in text.splitlines():
+            m = _TIMELINE_LINE_RE.match(line.strip())
+            if m:
+                names.add(m.group(1).strip().lower())
+        if names:
+            return names
         for line in text.splitlines():
             for tok in re.findall(r"[^\s\"',|]+\.[A-Za-z0-9]{2,5}\b", line):
                 names.add(os.path.basename(tok).lower())
