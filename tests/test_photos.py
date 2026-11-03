@@ -349,3 +349,18 @@ def test_raw_files_never_sent_but_listed(env):
     assert sent == ["DSC_3452.jpg", "ok.jpg"] and (up, failed) == (2, 0)
     assert summary["raw_not_uploaded"] == 1
     assert env.photos.raw_report_path().read_text().strip() == "Pictures/DSC_3452.NEF"
+
+
+def test_converted_jpg_takes_date_from_raw_sibling(env):
+    d = env.root / "Pictures" / "Animal party 2022"
+    make_jpeg(d / "DSC_3452.jpg")                       # no EXIF date, mtime = conversion time
+    (d / "DSC_3452.NEF").write_bytes(b"raw")
+    make_jpeg(d / "DSC_9999.jpg")                       # no RAW sibling -> stays held back
+    want = datetime(2022, 6, 10, 18, 30, 0).timestamp()
+    env.photos._exiftool_dates = lambda paths: {p: want for p in paths if p.endswith(".NEF")}
+    items, held = env.photos.split_held_back(env.photos.scan_photos())
+    got = {os.path.basename(i.abs): i for i in items}
+    assert got["DSC_3452.jpg"].date_source == "raw_sibling" and got["DSC_3452.jpg"].date == want
+    assert got["DSC_3452.jpg"].needs_stage
+    assert [os.path.basename(i.abs) for i in held] == ["DSC_9999.jpg"]
+    assert (d / "DSC_3452.NEF").read_bytes() == b"raw"

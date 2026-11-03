@@ -233,18 +233,45 @@ def _exiftool_dates(paths: list[str]) -> dict[str, float]:
     return out
 
 
+def _raw_sibling(abs_path: str) -> Optional[str]:
+    """A RAW file in the same folder with the same stem (e.g. DSC_1.jpg -> DSC_1.NEF)."""
+    d, fn = os.path.split(abs_path)
+    stem = os.path.splitext(fn)[0].lower()
+    try:
+        names = sorted(os.listdir(d))
+    except OSError:
+        return None
+    for n in names:
+        s_, e_ = os.path.splitext(n)
+        if s_.lower() == stem and e_.lower() in RAW_EXTS:
+            return os.path.join(d, n)
+    return None
+
+
 def apply_fallback_dates(items: list["PhotoItem"]) -> None:
     """For files without a (JPEG) EXIF date: exiftool metadata, then filename, then
-    folder date, then mtime. Only sets a fallback stamped on upload copies."""
+    the capture date of a same-named RAW next to it (converted copies lose EXIF and
+    carry the conversion time as mtime), then folder date, then mtime. Only sets a
+    fallback stamped on upload copies."""
     todo = [i for i in items if i.date_source != "exif"]
     ex = _exiftool_dates([i.abs for i in todo])
+    sib: dict[str, str] = {}
+    for it in todo:
+        if it.abs not in ex and it.date_source == "mtime":
+            r = _raw_sibling(it.abs)
+            if r:
+                sib[it.abs] = r
+    sib_dates = _exiftool_dates(sorted(set(sib.values()))) if sib else {}
     for it in todo:
         if it.abs in ex:
             it.date, it.date_source = ex[it.abs], "exiftool"
         elif it.date_source == "mtime":
-            fd = folder_datetime(it.rel)
-            if fd:
-                it.date, it.date_source = fd, "folder"
+            if it.abs in sib and sib[it.abs] in sib_dates:
+                it.date, it.date_source = sib_dates[sib[it.abs]], "raw_sibling"
+            else:
+                fd = folder_datetime(it.rel)
+                if fd:
+                    it.date, it.date_source = fd, "folder"
         it.needs_stage = it.date_source != "mtime" and abs((it.date or 0) - it.mtime) > DATE_TOLERANCE_S
 
 
