@@ -44,6 +44,9 @@ PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".heic", ".heif", ".webp", ".tif"
               ".tiff", ".bmp", ".dng", ".cr2", ".cr3", ".nef", ".arw", ".orf", ".raf", ".rw2"}
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".avi", ".mkv", ".3gp", ".mts", ".m2ts", ".wmv", ".webm"}
 MEDIA_EXTS = PHOTO_EXTS | VIDEO_EXTS
+# Proton Photos silently drops RAW files (CLI still exits 0), so they are never sent.
+# They stay in Drive and are listed in photos_raw_not_uploaded.txt.
+RAW_EXTS = {".dng", ".cr2", ".cr3", ".nef", ".arw", ".orf", ".raf", ".rw2"}
 
 # Screenshots are deliberately not uploaded to Photos.
 EXCLUDED_DIR_NAMES = {"screenshots"}          # compared case-insensitively
@@ -260,7 +263,7 @@ class PhotoItem:
     dup_of: Optional[str] = None       # rel of a byte-identical item that gets uploaded instead
 
 
-def scan_photos() -> list[PhotoItem]:
+def scan_photos(include_raw: bool = False) -> list[PhotoItem]:
     root = photos_root()
     items: list[PhotoItem] = []
     if not root.is_dir():
@@ -272,7 +275,8 @@ def scan_photos() -> list[PhotoItem]:
                              and d not in config.DEFAULT_DIR_EXCLUDES
                              and not any(fnmatch.fnmatch(d, p) for p in config.DEFAULT_EXCLUDES))
         for fn in sorted(filenames):
-            if os.path.splitext(fn)[1].lower() not in MEDIA_EXTS:
+            ext = os.path.splitext(fn)[1].lower()
+            if ext not in MEDIA_EXTS or (ext in RAW_EXTS and not include_raw):
                 continue
             ap = os.path.join(dirpath, fn)
             rel = os.path.relpath(ap, base).replace(os.sep, "/")
@@ -352,6 +356,19 @@ def resolve_name_collisions(items: list[PhotoItem]) -> dict:
                 rep.needs_stage = True
                 stats["renamed_variants"] += 1
     return stats
+
+
+def raw_report_path() -> Path:
+    return config.DATA_DIR / "photos_raw_not_uploaded.txt"
+
+
+def write_raw_report() -> int:
+    """List RAW files that are deliberately not sent to Photos. Returns the count."""
+    raws = sorted(i.rel for i in scan_photos(include_raw=True)
+                  if os.path.splitext(i.abs)[1].lower() in RAW_EXTS)
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    raw_report_path().write_text("".join(f"{r}\n" for r in raws))
+    return len(raws)
 
 
 def held_back_path() -> Path:
@@ -444,6 +461,8 @@ def sync_photos(db, apply: bool = False, limit: Optional[int] = None) -> tuple[d
     summary = summarize(items, pending, coll)
     summary["held_back_undated"] = len(held)
     summary["held_back_list"] = str(held_back_path())
+    summary["raw_not_uploaded"] = write_raw_report()
+    summary["raw_list"] = str(raw_report_path())
     if not apply:
         return summary, 0, 0
 

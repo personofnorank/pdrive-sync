@@ -319,17 +319,17 @@ def test_apply_skips_names_already_in_photos_and_refuses_without_timeline(env):
 def test_silently_dropped_file_is_not_recorded(env):
     """CLI exits 0 but never lists the file (e.g. RAW): must not be recorded as uploaded."""
     make_jpeg(env.root / "Pictures" / "ok.jpg", datetime(2019, 7, 4, 12, 0, 0))
-    make_jpeg(env.root / "Pictures" / "IMG_20190704_120001.NEF")
+    make_jpeg(env.root / "Pictures" / "IMG_20190704_120001_drop.jpg")
 
     def fake(paths):
         env.calls.append(list(paths))
         env.remote.extend(f"Nov 03 2026 15:56 1 KiB {os.path.basename(p)}"
-                          for p in paths if not p.endswith(".NEF"))
+                          for p in paths if "_drop" not in os.path.basename(p))
     env.proton.photo_upload = fake
     summary, up, failed = env.photos.sync_photos(env.db, apply=True)
     assert (up, failed) == (1, 1) and summary["not_in_photos_after_upload"] == 1
     assert [k[0] for k in env.db.photo_uploaded_keys()] == ["Pictures/ok.jpg"]
-    assert env.photos.unconfirmed_path().read_text().strip() == "Pictures/IMG_20190704_120001.NEF"
+    assert env.photos.unconfirmed_path().read_text().strip() == "Pictures/IMG_20190704_120001_drop.jpg"
 
 
 def test_verify_flags_recorded_but_missing_from_photos(env):
@@ -338,3 +338,14 @@ def test_verify_flags_recorded_but_missing_from_photos(env):
     env.remote.clear(); env.remote.append("Jan 01 2000 00:00 - unrelated_zz.jpg")
     r = env.photos.verify_photos(env.db)
     assert not r["clean"] and r["recorded_but_not_in_photos"] == 1
+
+
+def test_raw_files_never_sent_but_listed(env):
+    make_jpeg(env.root / "Pictures" / "ok.jpg", datetime(2019, 7, 4, 12, 0, 0))
+    make_jpeg(env.root / "Pictures" / "DSC_3452.NEF", datetime(2022, 6, 10, 12, 0, 0))
+    make_jpeg(env.root / "Pictures" / "DSC_3452.jpg", datetime(2022, 6, 10, 12, 0, 0))
+    summary, up, failed = env.photos.sync_photos(env.db, apply=True)
+    sent = sorted(os.path.basename(p) for c in env.calls for p in c)
+    assert sent == ["DSC_3452.jpg", "ok.jpg"] and (up, failed) == (2, 0)
+    assert summary["raw_not_uploaded"] == 1
+    assert env.photos.raw_report_path().read_text().strip() == "Pictures/DSC_3452.NEF"
