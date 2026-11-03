@@ -358,6 +358,19 @@ def held_back_path() -> Path:
     return config.DATA_DIR / "photos_held_back.txt"
 
 
+class PhotosTimelineError(RuntimeError):
+    """The Photos timeline could not be read; uploading without it is refused."""
+
+
+def skipped_path() -> Path:
+    return config.DATA_DIR / "photos_skipped_in_photos.txt"
+
+
+def write_skipped_report(skipped: list[PhotoItem]) -> None:
+    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+    skipped_path().write_text("".join(f"{i.rel}\n" for i in sorted(skipped, key=lambda i: i.rel)))
+
+
 def split_held_back(items: list[PhotoItem]) -> tuple[list[PhotoItem], list[PhotoItem]]:
     """Files with no capture date from ANY source (only mtime, which is just the
     sync time) are held back so they don't land at 'today' on the timeline.
@@ -431,6 +444,21 @@ def sync_photos(db, apply: bool = False, limit: Optional[int] = None) -> tuple[d
         return summary, 0, 0
 
     by_rel = {i.rel: i for i in items}
+    # Never add what Photos already has (e.g. the phone's own backup): skip by name.
+    # If the timeline can't be read or parsed we cannot know, so refuse to upload.
+    try:
+        remote = remote_names_from_timeline(proton.photo_timeline())
+    except Exception as e:
+        raise PhotosTimelineError(f"cannot read Photos timeline: {e}") from e
+    if not remote:
+        raise PhotosTimelineError("Photos timeline was empty or unrecognised")
+    in_photos = {i.rel for i in pending if not i.dup_of
+                 and (i.upload_name or os.path.basename(i.abs)).lower() in remote}
+    in_photos |= {i.rel for i in pending if i.dup_of in in_photos}
+    write_skipped_report([i for i in pending if i.rel in in_photos])
+    summary["skipped_already_in_photos"] = len(in_photos)
+    summary["skipped_list"] = str(skipped_path())
+    pending = [i for i in pending if i.rel not in in_photos]
     # duplicates whose representative is already uploaded are covered without upload
     covered = [i for i in pending if i.dup_of and (i.dup_of, by_rel[i.dup_of].size) in done]
     if covered:

@@ -194,7 +194,12 @@ def cmd_photos_sync(args):
             print(f"  {k}: {v}")
         print(("VERIFY CLEAN (uploaded files only; held-back undated files are NOT in Photos: keep their Drive copies)" if res["clean"] else "VERIFY NOT CLEAN: do not delete anything from Drive"))
         return 0 if res["clean"] else 1
-    summary, up, failed = photos.sync_photos(db, apply=args.apply, limit=args.limit)
+    try:
+        summary, up, failed = photos.sync_photos(db, apply=args.apply, limit=args.limit)
+    except photos.PhotosTimelineError as e:
+        db.close()
+        print(f"REFUSED: {e}. Nothing was uploaded.")
+        return 2
     db.close()
     print(f"photos source: {photos.photos_root()}  (screenshots excluded)")
     for k, v in summary.items():

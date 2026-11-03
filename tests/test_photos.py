@@ -43,6 +43,7 @@ def env(tmp_path, monkeypatch):
     calls = []
     monkeypatch.setattr(photos, "_exiftool_dates", lambda paths: {})
     monkeypatch.setattr(proton, "photo_upload", lambda paths: calls.append(list(paths)) or "")
+    monkeypatch.setattr(proton, "photo_timeline", lambda: "Jan 01 2000 00:00 - unrelated_zz.jpg\n")
     db = state.StateDB()
     yield type("E", (), dict(root=root, db=db, photos=photos, proton=proton, calls=calls))
     db.close()
@@ -278,3 +279,24 @@ def test_undated_files_are_held_back_not_uploaded(env):
     env.proton.photo_timeline = lambda: "- " + sent[0]
     r = env.photos.verify_photos(env.db)
     assert r["held_back_undated_NOT_IN_PHOTOS"] == 1 and r["clean"]
+
+
+def test_apply_skips_names_already_in_photos_and_refuses_without_timeline(env):
+    _jpg_bytes(env.root / "Pictures" / "a" / "have.jpg", b"1")
+    _jpg_bytes(env.root / "Pictures" / "b" / "new.jpg", b"2")
+    _jpg_bytes(env.root / "Pictures" / "c" / "have.jpg", b"1")  # identical dup of the skipped one
+    env.proton.photo_timeline = lambda: "Nov 02 2026 13:58 2.54 MiB HAVE.jpg\n"
+    summary, up, failed = env.photos.sync_photos(env.db, apply=True)
+    sent = [os.path.basename(p) for c in env.calls for p in c]
+    assert sent == ["new.jpg"] and up == 1 and failed == 0
+    assert summary["skipped_already_in_photos"] == 2
+    assert env.photos.skipped_path().read_text().count("have.jpg") == 2
+    assert env.db.photo_uploaded_keys() and all("have.jpg" not in k[0] for k in env.db.photo_uploaded_keys())
+    # unreadable / empty / failing timeline: refuse, upload nothing, record nothing
+    for bad in (lambda: "garbage", lambda: "", lambda: (_ for _ in ()).throw(env.proton.CliError("auth"))):
+        env.calls.clear()
+        env.proton.photo_timeline = bad
+        _jpg_bytes(env.root / "Pictures" / "d" / "other.jpg", b"3")
+        with pytest.raises(env.photos.PhotosTimelineError):
+            env.photos.sync_photos(env.db, apply=True)
+        assert env.calls == []
