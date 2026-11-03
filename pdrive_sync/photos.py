@@ -366,6 +366,10 @@ def skipped_path() -> Path:
     return config.DATA_DIR / "photos_skipped_in_photos.txt"
 
 
+def unconfirmed_path() -> Path:
+    return config.DATA_DIR / "photos_not_in_photos_after_upload.txt"
+
+
 def write_skipped_report(skipped: list[PhotoItem]) -> None:
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     skipped_path().write_text("".join(f"{i.rel}\n" for i in sorted(skipped, key=lambda i: i.rel)))
@@ -472,6 +476,7 @@ def sync_photos(db, apply: bool = False, limit: Optional[int] = None) -> tuple[d
         if i.dup_of and i.rel not in cov:
             dups_of.setdefault(i.dup_of, []).append(i)
     uploaded = failed = 0
+    unconfirmed: list[str] = []
     for batch in _batches(todo):
         sdir = stage_dir() / f"batch-{os.getpid()}-{int(time.time() * 1000)}"
         try:
@@ -483,11 +488,31 @@ def sync_photos(db, apply: bool = False, limit: Optional[int] = None) -> tuple[d
             continue
         finally:
             _cleanup_stage(sdir)
-        keys = [(i.rel, i.size) for i in batch]
-        keys += [(d.rel, d.size) for i in batch for d in dups_of.get(i.rel, [])]
-        db.photo_mark_uploaded(keys)
-        uploaded += len(batch)
-        log.info("photos: uploaded batch of %d (%d total)", len(batch), uploaded)
+        # The CLI exits 0 even when it silently drops a file (e.g. RAW), so only record
+        # files whose name is actually in the Photos timeline afterwards.
+        try:
+            seen = remote_names_from_timeline(proton.photo_timeline()) or set()
+        except Exception as e:
+            log.warning("photos: cannot confirm batch in timeline: %s", e)
+            seen = set()
+        ok = [i for i in batch if (i.upload_name or os.path.basename(i.abs)).lower() in seen]
+        bad = [i for i in batch if i not in ok]
+        keys = [(i.rel, i.size) for i in ok]
+        keys += [(d.rel, d.size) for i in ok for d in dups_of.get(i.rel, [])]
+        if keys:
+            db.photo_mark_uploaded(keys)
+        uploaded += len(ok)
+        failed += len(bad)
+        unconfirmed.extend(i.rel for i in bad)
+        if bad:
+            log.warning("photos: %d file(s) NOT found in Photos after upload (not recorded)", len(bad))
+        log.info("photos: confirmed %d of batch of %d (%d total)", len(ok), len(batch), uploaded)
+    if unconfirmed:
+        config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+        unconfirmed_path().write_text("".join(f"{r}\n" for r in sorted(unconfirmed)))
+    summary["not_in_photos_after_upload"] = len(unconfirmed)
+    if unconfirmed:
+        summary["not_in_photos_list"] = str(unconfirmed_path())
     return summary, uploaded, failed
 
 
@@ -568,6 +593,9 @@ def verify_photos(db, check_remote: bool = True) -> dict:
             res["remote_check"] = "failed: could not parse timeline output"
             return res
         missing = sorted(r for r, n in expected.items() if n not in names)
+        ghost = sorted(r for r, n in expected.items() if (r, by_rel[r].size) in done and n not in names)
+        res["recorded_but_not_in_photos"] = len(ghost)
+        res["recorded_but_not_in_photos_sample"] = ghost[:20]
         res.update(remote_check="ok", missing_in_photos=len(missing), missing_sample=missing[:20])
-        res["clean"] = not not_recorded and not missing
+        res["clean"] = not not_recorded and not missing and not ghost
     return res

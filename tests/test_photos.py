@@ -42,10 +42,16 @@ def env(tmp_path, monkeypatch):
     importlib.reload(state); importlib.reload(proton); importlib.reload(photos)
     calls = []
     monkeypatch.setattr(photos, "_exiftool_dates", lambda paths: {})
-    monkeypatch.setattr(proton, "photo_upload", lambda paths: calls.append(list(paths)) or "")
-    monkeypatch.setattr(proton, "photo_timeline", lambda: "Jan 01 2000 00:00 - unrelated_zz.jpg\n")
+    remote = ["Jan 01 2000 00:00 - unrelated_zz.jpg"]  # simulated Photos library
+
+    def fake_upload(paths):
+        calls.append(list(paths))
+        remote.extend(f"Nov 03 2026 15:56 1 KiB {os.path.basename(p)}" for p in paths)
+        return ""
+    monkeypatch.setattr(proton, "photo_upload", fake_upload)
+    monkeypatch.setattr(proton, "photo_timeline", lambda: "\n".join(remote) + "\n")
     db = state.StateDB()
-    yield type("E", (), dict(root=root, db=db, photos=photos, proton=proton, calls=calls))
+    yield type("E", (), dict(root=root, db=db, photos=photos, proton=proton, calls=calls, remote=remote))
     db.close()
 
 
@@ -123,6 +129,7 @@ def test_apply_stages_copy_with_capture_date_and_leaves_original(env):
         assert len(paths) == 1 and paths[0] != str(f)
         seen["mtime"] = os.stat(paths[0]).st_mtime
         env.calls.append(paths)
+        env.remote.append(f"Nov 03 2026 15:56 1 KiB {os.path.basename(paths[0])}")
     env.proton.photo_upload = fake
     _, up, failed = env.photos.sync_photos(env.db, apply=True)
     assert (up, failed) == (1, 0)
@@ -183,6 +190,7 @@ def test_different_content_same_name_each_gets_unique_name(env):
 
     def fake(paths):
         names.extend(os.path.basename(p) for p in paths)
+        env.remote.extend(f"Nov 03 2026 15:56 1 KiB {os.path.basename(p)}" for p in paths)
         for p in paths:
             assert os.path.exists(p) and "/photos-stage/" in p
     env.proton.photo_upload = fake
@@ -225,7 +233,10 @@ def test_verify_clean_and_not_clean(env):
     _jpg_bytes(env.root / "Pictures" / "c" / "IMG_1.jpg", b"y2")   # dup of b
     _jpg_bytes(env.root / "Pictures" / "z.jpg", b"zz")
     names = []
-    env.proton.photo_upload = lambda paths: names.extend(os.path.basename(p) for p in paths)
+    def up_(paths):
+        names.extend(os.path.basename(p) for p in paths)
+        env.remote.extend(f"Nov 03 2026 15:56 1 KiB {os.path.basename(p)}" for p in paths)
+    env.proton.photo_upload = up_
     r = env.photos.verify_photos(env.db, check_remote=False)
     assert not r["clean"] and r["not_recorded_as_uploaded"] == 4
     env.photos.sync_photos(env.db, apply=True)
@@ -270,7 +281,10 @@ def test_undated_files_are_held_back_not_uploaded(env):
     (env.root / "Pictures" / "Unsorted" / "plain.jpg").write_bytes(b"\xff\xd8\xff\xd9 no exif")
     _jpg_bytes(env.root / "Pictures" / "IMG_20230930_150459.jpg", b"dated")
     sent = []
-    env.proton.photo_upload = lambda paths: sent.extend(os.path.basename(p) for p in paths)
+    def up_(paths):
+        sent.extend(os.path.basename(p) for p in paths)
+        env.remote.extend(f"Nov 03 2026 15:56 1 KiB {os.path.basename(p)}" for p in paths)
+    env.proton.photo_upload = up_
     summary, up, failed = env.photos.sync_photos(env.db, apply=True)
     assert sent == ["IMG_20230930_150459.jpg"] and up == 1 and failed == 0
     assert summary["held_back_undated"] == 1
@@ -285,7 +299,7 @@ def test_apply_skips_names_already_in_photos_and_refuses_without_timeline(env):
     _jpg_bytes(env.root / "Pictures" / "a" / "have.jpg", b"1")
     _jpg_bytes(env.root / "Pictures" / "b" / "new.jpg", b"2")
     _jpg_bytes(env.root / "Pictures" / "c" / "have.jpg", b"1")  # identical dup of the skipped one
-    env.proton.photo_timeline = lambda: "Nov 02 2026 13:58 2.54 MiB HAVE.jpg\n"
+    env.remote.append("Nov 02 2026 13:58 2.54 MiB HAVE.jpg")
     summary, up, failed = env.photos.sync_photos(env.db, apply=True)
     sent = [os.path.basename(p) for c in env.calls for p in c]
     assert sent == ["new.jpg"] and up == 1 and failed == 0
@@ -300,3 +314,27 @@ def test_apply_skips_names_already_in_photos_and_refuses_without_timeline(env):
         with pytest.raises(env.photos.PhotosTimelineError):
             env.photos.sync_photos(env.db, apply=True)
         assert env.calls == []
+
+
+def test_silently_dropped_file_is_not_recorded(env):
+    """CLI exits 0 but never lists the file (e.g. RAW): must not be recorded as uploaded."""
+    make_jpeg(env.root / "Pictures" / "ok.jpg", datetime(2019, 7, 4, 12, 0, 0))
+    make_jpeg(env.root / "Pictures" / "IMG_20190704_120001.NEF")
+
+    def fake(paths):
+        env.calls.append(list(paths))
+        env.remote.extend(f"Nov 03 2026 15:56 1 KiB {os.path.basename(p)}"
+                          for p in paths if not p.endswith(".NEF"))
+    env.proton.photo_upload = fake
+    summary, up, failed = env.photos.sync_photos(env.db, apply=True)
+    assert (up, failed) == (1, 1) and summary["not_in_photos_after_upload"] == 1
+    assert [k[0] for k in env.db.photo_uploaded_keys()] == ["Pictures/ok.jpg"]
+    assert env.photos.unconfirmed_path().read_text().strip() == "Pictures/IMG_20190704_120001.NEF"
+
+
+def test_verify_flags_recorded_but_missing_from_photos(env):
+    make_jpeg(env.root / "Pictures" / "ok.jpg", datetime(2019, 7, 4, 12, 0, 0))
+    env.photos.sync_photos(env.db, apply=True)
+    env.remote.clear(); env.remote.append("Jan 01 2000 00:00 - unrelated_zz.jpg")
+    r = env.photos.verify_photos(env.db)
+    assert not r["clean"] and r["recorded_but_not_in_photos"] == 1
