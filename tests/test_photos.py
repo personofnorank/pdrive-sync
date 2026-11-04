@@ -364,3 +364,24 @@ def test_converted_jpg_takes_date_from_raw_sibling(env):
     assert got["DSC_3452.jpg"].needs_stage
     assert [os.path.basename(i.abs) for i in held] == ["DSC_9999.jpg"]
     assert (d / "DSC_3452.NEF").read_bytes() == b"raw"
+
+
+def test_failed_batch_is_retried_file_by_file_and_names_the_bad_file(env):
+    for n in ("a.jpg", "bad.jpg", "c.jpg"):
+        make_jpeg(env.root / "Pictures" / n, datetime(2019, 7, 4, 12, 0, 0))
+    calls = []
+
+    def flaky(paths):
+        calls.append([os.path.basename(p) for p in paths])
+        for p in paths:                      # like the CLI: the good files go up, then it errors
+            if not p.endswith("bad.jpg"):
+                env.remote.append(f"Nov 03 2026 15:56 1 KiB {os.path.basename(p)}")
+        if any(p.endswith("bad.jpg") for p in paths):
+            raise env.proton.CliError("1 item(s) failed to upload")
+        return ""
+    env.proton.photo_upload = flaky
+    summary, up, failed = env.photos.sync_photos(env.db, apply=True)
+    assert (up, failed) == (2, 1)
+    assert sorted(k[0] for k in env.db.photo_uploaded_keys()) == ["Pictures/a.jpg", "Pictures/c.jpg"]
+    assert env.photos.unconfirmed_path().read_text().strip() == "Pictures/bad.jpg"
+    assert calls[0] == ["a.jpg", "bad.jpg", "c.jpg"] and len(calls) == 4   # batch + 3 single retries

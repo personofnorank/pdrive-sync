@@ -525,15 +525,26 @@ def sync_photos(db, apply: bool = False, limit: Optional[int] = None) -> tuple[d
     unconfirmed: list[str] = []
     for batch in _batches(todo):
         sdir = stage_dir() / f"batch-{os.getpid()}-{int(time.time() * 1000)}"
+        errors: dict[str, str] = {}   # rel -> error, for files the CLI itself rejected
         try:
-            paths = [_stage(i, sdir) if i.needs_stage else i.abs for i in batch]
-            proton.photo_upload(paths)
-        except Exception as e:  # CliError or copy failure: leave the batch unrecorded
-            log.warning("photos: batch of %d failed: %s", len(batch), e)
-            failed += len(batch)
-            continue
+            try:
+                proton.photo_upload([_stage(i, sdir) if i.needs_stage else i.abs for i in batch])
+            except Exception as e:  # CliError or copy failure
+                if len(batch) == 1:
+                    errors[batch[0].rel] = str(e)
+                else:
+                    # The CLI does not name the failing file: retry one by one (add-only,
+                    # `-c skip`, so files that already went up are not duplicated).
+                    log.warning("photos: batch of %d failed (%s); retrying file by file", len(batch), e)
+                    for i in batch:
+                        try:
+                            proton.photo_upload([_stage(i, sdir) if i.needs_stage else i.abs])
+                        except Exception as e1:
+                            errors[i.rel] = str(e1)
         finally:
             _cleanup_stage(sdir)
+        for rel, msg in errors.items():
+            log.warning("photos: upload failed for %s: %s", rel, msg)
         # The CLI exits 0 even when it silently drops a file (e.g. RAW), so only record
         # files whose name is actually in the Photos timeline afterwards.
         try:
@@ -550,6 +561,9 @@ def sync_photos(db, apply: bool = False, limit: Optional[int] = None) -> tuple[d
         uploaded += len(ok)
         failed += len(bad)
         unconfirmed.extend(i.rel for i in bad)
+        if bad:   # write after every batch so an interrupted run still leaves the list
+            config.DATA_DIR.mkdir(parents=True, exist_ok=True)
+            unconfirmed_path().write_text("".join(f"{r}\n" for r in sorted(unconfirmed)))
         if bad:
             log.warning("photos: %d file(s) NOT found in Photos after upload (not recorded)", len(bad))
         log.info("photos: confirmed %d of batch of %d (%d total)", len(ok), len(batch), uploaded)
