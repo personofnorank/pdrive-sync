@@ -385,3 +385,32 @@ def test_failed_batch_is_retried_file_by_file_and_names_the_bad_file(env):
     assert sorted(k[0] for k in env.db.photo_uploaded_keys()) == ["Pictures/a.jpg", "Pictures/c.jpg"]
     assert env.photos.unconfirmed_path().read_text().strip() == "Pictures/bad.jpg"
     assert calls[0] == ["a.jpg", "bad.jpg", "c.jpg"] and len(calls) == 4   # batch + 3 single retries
+
+
+def test_verify_accepts_tagged_variant_after_collision_group_shrinks(env):
+    a = env.root / "Pictures" / "a" / "IMG_0001.jpg"
+    b = env.root / "Pictures" / "b" / "IMG_0001.jpg"
+    _jpg_bytes(a, b"one1"); _jpg_bytes(b, b"two2")
+    env.photos.sync_photos(env.db, apply=True)          # both uploaded as IMG_0001__<tag>.jpg
+    assert env.photos.verify_photos(env.db)["clean"]
+    b.unlink()                                          # group shrinks: expected name is now plain
+    r = env.photos.verify_photos(env.db)
+    assert r["missing_in_photos"] == 0 and r["recorded_but_not_in_photos"] == 0 and r["clean"]
+
+
+def test_verify_tagged_alternative_does_not_hide_a_truly_missing_file(env):
+    make_jpeg(env.root / "Pictures" / "ok.jpg", datetime(2019, 7, 4, 12, 0, 0))
+    env.photos.sync_photos(env.db, apply=True)
+    env.remote.clear(); env.remote.append("Jan 01 2000 00:00 - unrelated_zz.jpg")
+    r = env.photos.verify_photos(env.db)
+    assert not r["clean"] and r["missing_in_photos"] == 1
+
+
+def test_verify_reports_drive_only_groups_without_affecting_clean(env):
+    make_jpeg(env.root / "Pictures" / "ok.jpg", datetime(2019, 7, 4, 12, 0, 0))
+    for n in ("a.gif", "10151691146922433.jpg", "IMAG1135.jpg"):
+        (env.root / "Pictures" / n).write_bytes(b"x" + n.encode())
+    env.photos.sync_photos(env.db, apply=True)
+    r = env.photos.verify_photos(env.db)
+    assert r["drive_only_by_design"] == {"gif": 1, "download_style_names": 1, "camera_style_or_other": 1}
+    assert r["held_back_undated_NOT_IN_PHOTOS"] == 3 and r["clean"]

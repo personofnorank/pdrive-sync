@@ -623,6 +623,26 @@ def remote_names_from_timeline(text: str) -> Optional[set[str]]:
     return names or None
 
 
+def tagged_name(rel: str) -> str:
+    """The collision-variant upload name for a file: `stem__<8 hex of path hash>.ext`."""
+    stem, ext = os.path.splitext(os.path.basename(rel))
+    return f"{stem}__{hashlib.sha256(rel.encode()).hexdigest()[:8]}{ext}"
+
+
+def held_back_groups(held: list[PhotoItem]) -> dict[str, int]:
+    """Rough, report-only split of the Drive-only (undated) files. Heuristic by name."""
+    g = {"gif": 0, "download_style_names": 0, "camera_style_or_other": 0}
+    for i in held:
+        b = os.path.basename(i.rel)
+        if b.lower().endswith(".gif"):
+            g["gif"] += 1
+        elif re.match(r"^(\d{9,}|t\d{5,})", b) or re.search(r"_o\.\w+$", b):
+            g["download_style_names"] += 1
+        else:
+            g["camera_style_or_other"] += 1
+    return g
+
+
 def verify_photos(db, check_remote: bool = True) -> dict:
     """Read-only. Clean only if (1) every local media file is recorded as uploaded
     (or is a byte-identical duplicate of one) and (2) every expected upload name is
@@ -636,11 +656,17 @@ def verify_photos(db, check_remote: bool = True) -> dict:
     by_rel = {i.rel: i for i in items}
     not_recorded = [i.rel for i in items if (i.rel, i.size) not in done]
     expected = {}
+    alt = {}
     for i in items:
         rep = by_rel[i.dup_of] if i.dup_of else i
         expected[i.rel] = (rep.upload_name or os.path.basename(rep.rel)).lower()
+        # Variant names depend on which same-named files exist when the upload ran. If
+        # that group has since shrunk the expected name is plain, but the file went up
+        # as stem__tag.ext (tag derives from the path, so only our upload makes it).
+        alt[i.rel] = tagged_name(rep.rel).lower()
     res = {"local_files": len(items), "not_recorded_as_uploaded": len(not_recorded),
            "held_back_undated_NOT_IN_PHOTOS": len(held), "held_back_list": str(held_back_path()),
+           "drive_only_by_design": held_back_groups(held),
            "remote_check": "skipped", "missing_in_photos": None, "clean": False,
            "not_recorded_sample": not_recorded[:20]}
     if check_remote:
@@ -652,8 +678,8 @@ def verify_photos(db, check_remote: bool = True) -> dict:
         if names is None:
             res["remote_check"] = "failed: could not parse timeline output"
             return res
-        missing = sorted(r for r, n in expected.items() if n not in names)
-        ghost = sorted(r for r, n in expected.items() if (r, by_rel[r].size) in done and n not in names)
+        missing = sorted(r for r, n in expected.items() if n not in names and alt[r] not in names)
+        ghost = sorted(r for r, n in expected.items() if (r, by_rel[r].size) in done and n not in names and alt[r] not in names)
         res["recorded_but_not_in_photos"] = len(ghost)
         res["recorded_but_not_in_photos_sample"] = ghost[:20]
         res.update(remote_check="ok", missing_in_photos=len(missing), missing_sample=missing[:20])
