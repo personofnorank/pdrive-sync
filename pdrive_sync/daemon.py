@@ -78,6 +78,61 @@ class _Lock:
             self.fd.close()
 
 
+def _throttle_overflow_rebuild(on_overflow, min_interval: float = 30.0):
+    """Rate-limit watchdog's inotify-overflow recovery.
+
+    On IN_Q_OVERFLOW watchdog tears down and re-adds every recursive watch
+    (~13k dirs here). During a bulk download that happens several times a
+    second, pinning a core. We coalesce: at most one rebuild per
+    ``min_interval`` (a trailing rebuild is always scheduled so watches are
+    never left stale), and every overflow still calls ``on_overflow`` so a full
+    sync cycle runs -- which is what actually recovers lost events.
+    Returns True if patched, False if this watchdog has no such hook.
+    """
+    try:
+        from watchdog.observers import inotify as _ino
+        group = _ino.InotifyWatchGroup
+        orig = group.on_queue_overflow
+    except (ImportError, AttributeError):
+        return False
+    if getattr(orig, "_pdrive_throttled", False):
+        return True
+    state = {"last": 0.0, "timer": None}
+    lock = threading.Lock()
+
+    def throttled(self):
+        try:
+            on_overflow()
+        except Exception:
+            log.exception("overflow callback failed")
+        with lock:
+            now = time.monotonic()
+            if now - state["last"] >= min_interval:
+                state["last"] = now
+                run_now = True
+            else:
+                run_now = False
+                if state["timer"] is None:
+                    delay = min_interval - (now - state["last"])
+
+                    def deferred():
+                        with lock:
+                            state["timer"] = None
+                            state["last"] = time.monotonic()
+                        orig(self)
+
+                    t = threading.Timer(delay, deferred)
+                    t.daemon = True
+                    state["timer"] = t
+                    t.start()
+        if run_now:
+            orig(self)
+
+    throttled._pdrive_throttled = True
+    group.on_queue_overflow = throttled
+    return True
+
+
 class Watcher:
     def __init__(self, on_change):
         self.on_change = on_change
@@ -88,6 +143,7 @@ class Watcher:
         from watchdog.events import FileSystemEventHandler
 
         handler = _Handler(self.on_change)
+        _throttle_overflow_rebuild(lambda: self.on_change("<inotify overflow>"))
         self.observer = Observer()
         self.observer.schedule(handler, str(config.SYNC_ROOT), recursive=True)
         self.observer.start()
