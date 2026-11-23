@@ -52,7 +52,7 @@ if [[ ! -x "$VENV/bin/python" ]]; then
     echo "--- creating venv"
     python3 -m venv "$VENV"
 fi
-"$VENV/bin/pip" install -q --upgrade pip watchdog
+"$VENV/bin/pip" install -q --upgrade pip "watchdog==7.1.0"
 
 # --- user excludes (only if none present) -------------------------------------
 mkdir -p "$SYNC_ROOT"
